@@ -1,195 +1,89 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-
-import {
-  Box,
-  Button,
-  CircularProgress,
-  Typography,
-} from "@mui/material";
-
+import { Box, Button, CircularProgress, Typography } from "@mui/material";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-
 import { auth, db } from "@/lib/firebase";
 import Sidebar from "@/components/dashboard/Sidebar";
 
+const BG = "linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)";
+const GRAD = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
+const ALLOWED_ROLES = ["admin", "manager"];
+
+const Screen = ({ children }) => (
+  <Box
+    sx={{
+      minHeight: "100vh", display: "flex", alignItems: "center",
+      justifyContent: "center", flexDirection: "column", gap: 2,
+      px: 2, background: BG,
+    }}
+  >
+    {children}
+  </Box>
+);
+
 export default function DashboardLayout({ children }) {
   const router = useRouter();
-
-  const [loading, setLoading] = useState(true);
-  const [authorized, setAuthorized] = useState(false);
+  const [status, setStatus] = useState("loading"); // loading | ok | denied
   const [error, setError] = useState("");
+  const deniedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      // =====================================================
-      // 1. USER IS NOT LOGGED IN
-      // =====================================================
+      if (!mounted) return;
 
+      // Not logged in (skip redirect if we signed the user out ourselves,
+      // so the "Access Denied" screen stays visible)
       if (!user) {
-        if (!mounted) return;
-
-        setAuthorized(false);
-        setLoading(false);
-
-        router.replace("/login");
+        if (!deniedRef.current) router.replace("/login");
         return;
       }
 
+      deniedRef.current = false;
+
+      const deny = async (msg) => {
+        deniedRef.current = true;
+        setError(msg);
+        setStatus("denied");
+        await signOut(auth).catch(console.error);
+      };
+
       try {
-        console.log("Firebase authenticated user:", {
-          uid: user.uid,
-          email: user.email,
-        });
-
-        // =====================================================
-        // 2. GET USER PROFILE USING FIREBASE AUTH UID
-        // =====================================================
-
-        const userRef = doc(db, "users", user.uid);
-
-        const userSnapshot = await getDoc(userRef);
-
-        // =====================================================
-        // 3. USER PROFILE DOES NOT EXIST
-        // =====================================================
-
-        if (!userSnapshot.exists()) {
-          console.error(
-            "User profile not found in Firestore:",
-            user.uid
-          );
-
-          if (!mounted) return;
-
-          setAuthorized(false);
-          setError(
-            "Your account is authenticated, but no application user profile was found."
-          );
-          setLoading(false);
-
-          await signOut(auth);
-
-          router.replace("/login");
-
-          return;
-        }
-
-        // =====================================================
-        // 4. GET USER DATA
-        // =====================================================
-
-        const userData = userSnapshot.data();
-
-        console.log("Firestore user profile:", userData);
-
-        // =====================================================
-        // 5. CHECK ROLE
-        // =====================================================
-
-        const role = String(userData.role || "")
-          .trim()
-          .toLowerCase();
-
-        console.log("Application role:", role);
-
-        const allowedRoles = ["admin", "manager"];
-
-        if (!allowedRoles.includes(role)) {
-          console.error(
-            "Unauthorized role:",
-            role
-          );
-
-          if (!mounted) return;
-
-          setAuthorized(false);
-          setError(
-            `Your account does not have permission to access the dashboard. Current role: ${
-              role || "not assigned"
-            }`
-          );
-          setLoading(false);
-
-          await signOut(auth);
-
-          router.replace("/login");
-
-          return;
-        }
-
-        // =====================================================
-        // 6. OPTIONAL ACCOUNT STATUS CHECK
-        // =====================================================
-        //
-        // If the status field does not exist, the user is
-        // allowed because your current user document only
-        // contains email and role.
-        //
-
-        if (
-          userData.status &&
-          String(userData.status)
-            .trim()
-            .toUpperCase() !== "ACTIVE"
-        ) {
-          console.error(
-            "User account is not active:",
-            userData.status
-          );
-
-          if (!mounted) return;
-
-          setAuthorized(false);
-          setError(
-            "Your account is currently inactive. Please contact the administrator."
-          );
-          setLoading(false);
-
-          await signOut(auth);
-
-          router.replace("/login");
-
-          return;
-        }
-
-        // =====================================================
-        // 7. USER AUTHORIZED
-        // =====================================================
-
-        console.log(
-          "User authorization successful."
-        );
-
+        const snap = await getDoc(doc(db, "users", user.uid));
         if (!mounted) return;
 
-        setAuthorized(true);
+        if (!snap.exists()) {
+          return deny("No application user profile was found for this account.");
+        }
+
+        const data = snap.data();
+        const role = String(data.role || "").trim().toLowerCase();
+
+        if (!ALLOWED_ROLES.includes(role)) {
+          return deny(
+            `You don't have permission to access the dashboard. ` +
+            `Current role: ${role || "not assigned"}`
+          );
+        }
+
+        // Missing status is treated as active
+        if (data.status && String(data.status).trim().toUpperCase() !== "ACTIVE") {
+          return deny("Your account is inactive. Please contact the administrator.");
+        }
+
         setError("");
-        setLoading(false);
-      } catch (error) {
-        console.error(
-          "Dashboard authorization error:",
-          error
-        );
-
+        setStatus("ok");
+      } catch (e) {
+        console.error("Dashboard authorization error:", e);
         if (!mounted) return;
-
-        setAuthorized(false);
-        setError(
-          "Unable to verify your account. Please try again."
-        );
-        setLoading(false);
+        setError("Unable to verify your account. Please try again.");
+        setStatus("denied");
       }
     });
-
-    // =====================================================
-    // CLEANUP
-    // =====================================================
 
     return () => {
       mounted = false;
@@ -197,181 +91,73 @@ export default function DashboardLayout({ children }) {
     };
   }, [router]);
 
-  // =========================================================
-  // LOADING SCREEN
-  // =========================================================
+  const backToLogin = async () => {
+    await signOut(auth).catch(console.error);
+    router.replace("/login");
+  };
 
-  if (loading) {
+  if (status === "loading") {
     return (
-      <Box
-        sx={{
-          minHeight: "100vh",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          background:
-            "linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)",
-          gap: 2,
-        }}
-      >
-        <CircularProgress
-          size={42}
-          sx={{
-            color: "#667eea",
-          }}
-        />
-
-        <Typography
-          sx={{
-            color: "#6b7280",
-            fontSize: 14,
-          }}
-        >
+      <Screen>
+        <CircularProgress size={42} sx={{ color: "#667eea" }} />
+        <Typography sx={{ color: "#6b7280", fontSize: 14 }}>
           Verifying your account...
         </Typography>
-      </Box>
+      </Screen>
     );
   }
 
-  // =========================================================
-  // UNAUTHORIZED / ERROR SCREEN
-  // =========================================================
-
-  if (!authorized) {
+  if (status === "denied") {
     return (
-      <Box
-        sx={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          px: 2,
-          background:
-            "linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)",
-        }}
-      >
+      <Screen>
         <Box
           sx={{
-            width: "100%",
-            maxWidth: 480,
-            backgroundColor: "#ffffff",
-            borderRadius: "20px",
-            padding: {
-              xs: 3,
-              sm: 5,
-            },
-            textAlign: "center",
-            boxShadow:
-              "0 15px 40px rgba(0, 0, 0, 0.08)",
-            border: "1px solid #e5e7eb",
+            width: "100%", maxWidth: 480, bgcolor: "#fff", borderRadius: "20px",
+            p: { xs: 3, sm: 5 }, textAlign: "center",
+            boxShadow: "0 15px 40px rgba(0,0,0,.08)", border: "1px solid #e5e7eb",
           }}
         >
-          {/* Error icon */}
           <Box
             sx={{
-              width: 70,
-              height: 70,
-              borderRadius: "50%",
-              backgroundColor: "#fef2f2",
-              color: "#dc2626",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              margin: "0 auto 20px",
-              fontSize: 36,
-              fontWeight: 700,
+              width: 70, height: 70, borderRadius: "50%", bgcolor: "#fef2f2",
+              color: "#dc2626", display: "flex", alignItems: "center",
+              justifyContent: "center", mx: "auto", mb: 2.5,
+              fontSize: 36, fontWeight: 700,
             }}
           >
             !
           </Box>
-
-          <Typography
-            variant="h5"
-            sx={{
-              fontWeight: 700,
-              color: "#1f2937",
-              mb: 1,
-            }}
-          >
+          <Typography variant="h5" sx={{ fontWeight: 700, color: "#1f2937", mb: 1 }}>
             Access Denied
           </Typography>
-
-          <Typography
-            sx={{
-              color: "#6b7280",
-              fontSize: 14,
-              lineHeight: 1.7,
-              mb: 3,
-            }}
-          >
-            {error ||
-              "You are not authorized to access this dashboard."}
+          <Typography sx={{ color: "#6b7280", fontSize: 14, lineHeight: 1.7, mb: 3 }}>
+            {error || "You are not authorized to access this dashboard."}
           </Typography>
-
           <Button
             variant="contained"
-            onClick={async () => {
-              try {
-                await signOut(auth);
-              } catch (error) {
-                console.error(
-                  "Logout error:",
-                  error
-                );
-              }
-
-              router.replace("/login");
-            }}
+            onClick={backToLogin}
             sx={{
-              px: 4,
-              py: 1.2,
-              borderRadius: "10px",
-              textTransform: "none",
-              fontWeight: 600,
-              background:
-                "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-
-              "&:hover": {
-                background:
-                  "linear-gradient(135deg, #5a6fd8 0%, #6a4192 100%)",
-              },
+              px: 4, py: 1.2, borderRadius: "10px", textTransform: "none",
+              fontWeight: 600, background: GRAD,
+              "&:hover": { background: "linear-gradient(135deg, #5a6fd8, #6a4192)" },
             }}
           >
             Back to Login
           </Button>
         </Box>
-      </Box>
+      </Screen>
     );
   }
 
-  // =========================================================
-  // AUTHORIZED DASHBOARD
-  // =========================================================
-
   return (
-    <Box
-      sx={{
-        display: "flex",
-        minHeight: "100vh",
-        width: "100%",
-      }}
-    >
-      {/* Sidebar */}
+    <Box sx={{ display: "flex", minHeight: "100vh", width: "100%" }}>
       <Sidebar />
-
-      {/* Dashboard content */}
       <Box
+        component="main"
         sx={{
-          flex: 1,
-          marginLeft: {
-            xs: 0,
-            md: "280px",
-          },
-          overflow: "auto",
-          height: "100vh",
-          background:
-            "linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)",
+          flex: 1, minWidth: 0, height: "100vh", overflow: "auto", background: BG,
+          ml: { xs: 0, md: "var(--sidebar-w, 280px)" },
+          transition: "margin-left .25s ease",
         }}
       >
         {children}
